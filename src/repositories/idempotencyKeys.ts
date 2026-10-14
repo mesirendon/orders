@@ -109,3 +109,27 @@ export async function releaseIdempotencyKey(db: Db, customerId: string, key: str
     [customerId, key],
   );
 }
+
+export async function claimAbandonedKeysForExpiredOrders(
+  db: Db,
+  lockMs: number,
+  limit: number,
+): Promise<{ orderId: string; totalCents: number }[]> {
+  const { rows } = await db.query<{ order_id: string; total_cents: number }>(
+    `UPDATE idempotency_keys ik
+     SET locked_until = now() + make_interval(secs => $1 / 1000.0), updated_at = now()
+     FROM orders o
+     WHERE o.id = ik.order_id
+       AND (ik.customer_id, ik.key) IN (
+         SELECT k.customer_id, k.key
+         FROM idempotency_keys k
+         JOIN orders eo ON eo.id = k.order_id
+         WHERE k.status = 'IN_PROGRESS' AND k.locked_until <= now() AND eo.status = 'EXPIRED'
+         LIMIT $2
+         FOR UPDATE OF k SKIP LOCKED
+       )
+     RETURNING ik.order_id, o.total_cents`,
+    [lockMs, limit],
+  );
+  return rows.map((row) => ({ orderId: row.order_id, totalCents: row.total_cents }));
+}

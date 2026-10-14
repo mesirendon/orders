@@ -10,7 +10,7 @@ export type ChargeResult =
   | { outcome: 'DECLINED'; paymentId: string };
 
 export type PaymentLookup =
-  | { status: 'SUCCEEDED'; paymentId: string; refunded: boolean }
+  | { status: 'SUCCEEDED'; paymentId: string; cardLast4: string; refunded: boolean }
   | { status: 'DECLINED'; paymentId: string }
   | { status: 'NOT_FOUND' };
 

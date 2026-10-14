@@ -10,6 +10,7 @@ import {
 interface PaymentBody {
   paymentId?: string;
   status?: string;
+  cardLast4?: string;
   refunded?: boolean;
 }
 
@@ -43,7 +44,12 @@ export class HttpPaymentGateway implements PaymentGateway {
       throw new PaymentRejectedError(status, `payment lookup failed with status ${status}`);
     }
     if (body.status === 'SUCCEEDED') {
-      return { status: 'SUCCEEDED', paymentId: String(body.paymentId), refunded: body.refunded === true };
+      return {
+        status: 'SUCCEEDED',
+        paymentId: String(body.paymentId),
+        cardLast4: String(body.cardLast4),
+        refunded: body.refunded === true,
+      };
     }
     if (body.status === 'DECLINED') {
       return { status: 'DECLINED', paymentId: String(body.paymentId) };

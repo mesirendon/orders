@@ -12,7 +12,9 @@
     "dev": "tsx watch src/server.ts",
     "migrate": "tsx src/db/migrate.ts",
     "seed": "tsx src/db/seed.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "concurrency": "tsx scripts/concurrency.ts",
+    "demo": "bash scripts/demo.sh"
   },
   "dependencies": {
     "fastify": "^5.12.7",

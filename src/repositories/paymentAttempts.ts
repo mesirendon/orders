@@ -28,3 +28,11 @@ export async function insertPaymentAttempt(db: Db, attempt: NewPaymentAttempt): 
     ],
   );
 }
+
+export async function findLatestCardLast4(db: Db, orderId: string): Promise<string | undefined> {
+  const { rows } = await db.query<{ card_last4: string }>(
+    'SELECT card_last4 FROM payment_attempts WHERE order_id = $1 ORDER BY id DESC LIMIT 1',
+    [orderId],
+  );
+  return rows[0]?.card_last4;
+}

@@ -53,3 +53,13 @@ export async function expireActiveReservationsForOrder(db: Db, orderId: string):
   );
   return result.rowCount ?? 0;
 }
+
+export async function expireLapsedReservations(db: Db, orderIds: string[]): Promise<number> {
+  const result = await db.query(
+    `UPDATE stock_reservations
+     SET status = 'EXPIRED', updated_at = now()
+     WHERE order_id = ANY($1::uuid[]) AND status = 'ACTIVE' AND expires_at <= now()`,
+    [orderIds],
+  );
+  return result.rowCount ?? 0;
+}

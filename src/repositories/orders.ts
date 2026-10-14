@@ -168,3 +168,50 @@ export async function findOrder(db: Db, orderId: string): Promise<OrderRecord | 
     updatedAt: order.updated_at,
   };
 }
+
+export async function lockOrdersWithExpiredReservations(db: Db, limit: number): Promise<string[]> {
+  const { rows } = await db.query<{ id: string }>(
+    `SELECT o.id
+     FROM orders o
+     WHERE o.status IN ('PENDING', 'PAYMENT_UNKNOWN')
+       AND EXISTS (
+         SELECT 1 FROM stock_reservations sr
+         WHERE sr.order_id = o.id AND sr.status = 'ACTIVE' AND sr.expires_at <= now()
+       )
+     ORDER BY o.created_at
+     LIMIT $1
+     FOR UPDATE OF o SKIP LOCKED`,
+    [limit],
+  );
+  return rows.map((row) => row.id);
+}
+
+export async function expirePendingOrders(db: Db, orderIds: string[]): Promise<number> {
+  const result = await db.query(
+    `UPDATE orders SET status = 'EXPIRED', updated_at = now()
+     WHERE id = ANY($1::uuid[]) AND status = 'PENDING'`,
+    [orderIds],
+  );
+  return result.rowCount ?? 0;
+}
+
+export async function claimOrdersForReconciliation(
+  db: Db,
+  status: OrderStatus,
+  leaseSeconds: number,
+  limit: number,
+): Promise<{ orderId: string; totalCents: number }[]> {
+  const { rows } = await db.query<{ id: string; total_cents: number }>(
+    `UPDATE orders SET updated_at = now()
+     WHERE id IN (
+       SELECT id FROM orders
+       WHERE status = $1 AND updated_at <= now() - make_interval(secs => $2)
+       ORDER BY updated_at
+       LIMIT $3
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING id, total_cents`,
+    [status, leaseSeconds, limit],
+  );
+  return rows.map((row) => ({ orderId: row.id, totalCents: row.total_cents }));
+}

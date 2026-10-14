@@ -1,7 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { errorBody } from '../errors.js';
+import { findOrder } from '../repositories/orders.js';
 import { createOrder } from '../services/createOrder.js';
+import { toOrderResponse } from '../services/orderView.js';
 import type { Deps } from '../services/types.js';
 
 const idempotencyKeySchema = z.string().trim().min(1).max(255);
@@ -47,5 +49,17 @@ export function registerOrderRoutes(app: FastifyInstance, deps: Deps): void {
 
     const result = await createOrder(deps, { idempotencyKey: idempotencyKey.data, ...body.data }, request.log);
     return reply.code(result.statusCode).send(result.body);
+  });
+
+  app.get<{ Params: { id: string } }>('/orders/:id', async (request, reply) => {
+    const id = z.uuid().safeParse(request.params.id);
+    if (!id.success) {
+      return reply.code(400).send(errorBody('INVALID_ORDER_ID', 'Order id must be a UUID'));
+    }
+    const order = await findOrder(deps.pool, id.data);
+    if (!order) {
+      return reply.code(404).send(errorBody('ORDER_NOT_FOUND', 'Order not found'));
+    }
+    return toOrderResponse(order);
   });
 }

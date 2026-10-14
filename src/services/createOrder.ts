@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { AppError, appErrorBody } from '../errors.js';
+import { AppError, appErrorBody, errorBody } from '../errors.js';
 import { GeocodingError, type Address, type Coordinates } from '../geocoder/geocoder.js';
 import {
   completeIdempotencyKey,
@@ -10,6 +10,7 @@ import {
 import { TimeoutError, withTimeout } from '../timeout.js';
 import { chargeWithRetry } from './chargePayment.js';
 import { confirmOrder } from './confirmOrder.js';
+import { failOrder } from './failOrder.js';
 import { hashRequest } from './requestHash.js';
 import { reserveStock } from './reserveStock.js';
 import type { Deps, HttpResult, Logger } from './types.js';
@@ -98,7 +99,26 @@ async function processNewOrder(deps: Deps, input: CreateOrderInput, log: Logger)
     { maxAttempts: deps.config.PAYMENT_MAX_ATTEMPTS, backoffMs: deps.config.PAYMENT_BACKOFF_MS },
     log,
   );
-  if (charge.kind !== 'APPROVED') {
+  const cardLast4 = input.payment.cardNumber.slice(-4);
+
+  if (charge.kind === 'DECLINED') {
+    log.info({ orderId: reservation.orderId }, 'payment declined');
+    return failOrder(deps.pool, {
+      orderId: reservation.orderId,
+      customerId: input.customerId,
+      idempotencyKey: input.idempotencyKey,
+      attemptStatus: 'DECLINED',
+      processorPaymentId: charge.paymentId,
+      cardLast4,
+      amountCents: reservation.totalCents,
+      error: 'card declined',
+      response: {
+        statusCode: 402,
+        body: errorBody('PAYMENT_DECLINED', 'The card was declined', { orderId: reservation.orderId }),
+      },
+    });
+  }
+  if (charge.kind === 'UNREACHABLE') {
     throw new AppError(502, 'PAYMENT_FAILED', 'Payment could not be completed');
   }
 
@@ -107,7 +127,7 @@ async function processNewOrder(deps: Deps, input: CreateOrderInput, log: Logger)
     customerId: input.customerId,
     idempotencyKey: input.idempotencyKey,
     paymentId: charge.paymentId,
-    cardLast4: input.payment.cardNumber.slice(-4),
+    cardLast4,
     amountCents: reservation.totalCents,
   });
   if (!confirmation.confirmed) {

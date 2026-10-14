@@ -7,7 +7,12 @@ import { insertOrder } from '../repositories/orders.js';
 import { findProductPrices } from '../repositories/products.js';
 import { insertReservations } from '../repositories/reservations.js';
 import { lockStockRows, sumActiveReservations } from '../repositories/stock.js';
-import { findCandidateWarehouses, type RequestedItem } from '../repositories/warehouses.js';
+import {
+  findAvailabilityByWarehouse,
+  findCandidateWarehouses,
+  type RequestedItem,
+} from '../repositories/warehouses.js';
+import { computeShortfall } from './stockShortfall.js';
 
 export interface ReserveStockInput {
   orderId: string;
@@ -65,7 +70,13 @@ export async function reserveStock(pool: pg.Pool, input: ReserveStockInput): Pro
       return { orderId: input.orderId, warehouseId: candidate.warehouseId, totalCents };
     }
 
-    throw new AppError(409, 'INSUFFICIENT_STOCK', 'No single warehouse can fulfil this order');
+    const availability = await findAvailabilityByWarehouse(tx, productIds, input.shippingLocation);
+    throw new AppError(
+      409,
+      'INSUFFICIENT_STOCK',
+      'No single warehouse can fulfil this order',
+      computeShortfall(input.items, availability),
+    );
   });
 }
 

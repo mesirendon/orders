@@ -25,3 +25,13 @@ export async function confirmActiveReservations(db: Db, orderId: string): Promis
   );
   return result.rowCount ?? 0;
 }
+
+export async function releaseActiveReservations(db: Db, orderId: string): Promise<number> {
+  const result = await db.query(
+    `UPDATE stock_reservations
+     SET status = 'RELEASED', updated_at = now()
+     WHERE order_id = $1 AND status = 'ACTIVE'`,
+    [orderId],
+  );
+  return result.rowCount ?? 0;
+}

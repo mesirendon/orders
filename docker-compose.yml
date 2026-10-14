@@ -60,5 +60,20 @@ services:
       seed:
         condition: service_completed_successfully
 
+  payment-mock:
+    build: ./payment-mock
+    image: canals-payment-mock
+    stop_grace_period: 20s
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgres://canals:canals@postgres:5432/canals
+      PORT: "4000"
+      LOG_LEVEL: info
+      SLOW_RESPONSE_MS: "10000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:

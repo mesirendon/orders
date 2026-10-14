@@ -61,7 +61,7 @@ services/createOrder.ts
 | claim jobs | `repositories/orders.ts#claimOrdersForReconciliation` | `UPDATE … SET updated_at = now() WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED)` | Leases a batch. The HTTP work happens after commit. |
 | outbox | `services/outboxPoller.ts` | lock unpublished `SKIP LOCKED`, deliver, mark published | |
 
-All transactions use `READ COMMITTED` through `db/transaction.ts` (`withTransaction` / `inTransaction`).
+All transactions use `READ COMMITTED` through `db/transaction.ts` (`withTransaction` / `inTransaction`). `withTransaction` also guards the checked-out client against server-side session kills (§3, rule 6).
 
 ## 3. Locking rules
 
@@ -70,7 +70,10 @@ All transactions use `READ COMMITTED` through `db/transaction.ts` (`withTransact
 3. **Lock first, then count, in two statements.** `lockStockRows` (`SELECT … FOR UPDATE`) and `sumActiveReservations` are separate queries on purpose. In READ COMMITTED, a single statement reads from a snapshot taken when it started. If it had to wait for a lock, a subquery inside it would not see reservations committed by the transaction it was waiting on, and we would oversell. The second statement takes a fresh snapshot after the lock is held.
 4. **TX2 compares against `clock_timestamp()`, not `now()`.** `now()` is when the transaction started, which can be before it waited for the stock lock. With `now()`, a reservation that expired while TX2 was waiting could still be confirmed after another request had already reused that stock. TX1 uses `now()`, which only errs on the side of counting a reservation as still active.
 5. **The stock rows are the only contended resource.** Two orders for different products, or for different warehouses, never block each other.
-6. **The CHECK `on_hand >= 0` is the last line of defence.** A bug in the logic above would raise an error instead of overselling.
+6. **Every wait is bounded.** The API pool sets `lock_timeout` (5s), `statement_timeout` (10s) and `idle_in_transaction_session_timeout` (30s) as connection parameters, so Postgres enforces them. Config refuses to start unless lock < statement < idle. These errors (SQLSTATE 55P03, 57014, 25P03) become `503 DATABASE_BUSY` with `Retry-After`. Before an order exists, the key is released. After, it is unlocked and the retry resumes the same order. Migrate and seed connect without these limits because `CREATE EXTENSION postgis` can be slow.
+   - **A killed session can't crash the process.** `pg-pool` removes its error listener while a client is checked out, so a session that Postgres terminates between queries (idle timeout, `pg_terminate_backend`, a restart) would raise an unhandled `error` event and exit Node. `withTransaction` attaches its own listener for as long as it holds the client, rethrows the connection error as the cause, and releases the client with that error so the pool discards it.
+   - **A lock timeout fails the whole TX1; it does not skip to the next candidate.** Absorbing it per candidate could keep TX1 waiting for one lock timeout per warehouse (5 × 5s), longer than the 19.6s idempotency lock window. Until TX1 commits, the key has no order attached, so a retry that took over the lapsed key would create a second order. Failing fast keeps TX1 well inside the window. After TX1 a lapsed window is harmless: a takeover resumes the attached order, and every write is conditional.
+7. **The CHECK `on_hand >= 0` is the last line of defence.** A bug in the logic above would raise an error instead of overselling.
 
 Proof: `npm run concurrency -- --reset` fires 20 (or `PARALLEL=50`) simultaneous orders at the product with stock 1. Exactly one gets 201, the rest get 409, and `on_hand` ends at 0.
 
@@ -111,7 +114,7 @@ All three are `setInterval` jobs (`services/jobs.ts`). A tick is skipped if the 
 | Reconciler (10s) | `PAYMENT_UNKNOWN` (lease 30s) | Look up the payment. SUCCEEDED goes through the same TX2 / re-reserve / refund path as a request. DECLINED or NOT_FOUND → PAYMENT_FAILED and stock released. Provider still down → try again next tick. |
 | | `REFUND_PENDING` (lease 30s) | Retry the refund with the same `refund:{orderId}` key, then → CANCELLED. |
 | | Abandoned requests: key `IN_PROGRESS` with lock expired and order `EXPIRED` | Take over the key, look up the payment. Charged → re-reserve or refund. Not charged → complete the key with 409 ORDER_EXPIRED. This covers a crash after the charge when the client never retries. |
-| Outbox (2s) | Unpublished rows, `FOR UPDATE SKIP LOCKED`, in id order | Deliver to the stub consumer, then set `published_at`. A failed delivery stays unpublished and is retried. At-least-once. |
+| Outbox (2s) | Unpublished rows, `FOR UPDATE SKIP LOCKED`, in id order | Deliver to the stub consumer, then set `published_at`. A failed delivery stays unpublished and is retried. At-least-once. The transaction stays open during delivery, which is fine for an in-process stub that only logs. A real network consumer should use the reconciler's lease pattern instead (claim, commit, deliver, then mark published), otherwise a slow batch would hold row locks and could hit the 30s idle-in-transaction timeout. |
 
 A **lease** is how the reconciler avoids holding a transaction open during HTTP. It claims rows by bumping `updated_at` (`SKIP LOCKED` keeps instances from claiming the same row), commits, then does the slow work. Another instance won't see the row as eligible again until `updated_at` is 30s old. Even if two instances processed the same row, every write is conditional on the current status, so the second one changes nothing.
 
@@ -124,9 +127,11 @@ A **lease** is how the reconciler avoids holding a transaction open during HTTP.
 | 3 | Duplicate request while the first is running | – | 409 REQUEST_IN_PROGRESS | retry later |
 | 4 | Same key, different body | – | 422 | – |
 | 5 | Geocoding error | key COMPLETED (422) | 422 | – |
-| 6 | Geocoder timeout | key deleted | 504 | retry with the same key starts over |
+| 6 | Geocoder timeout | key deleted | 504 | retry with the same key starts over. A timeout is reported as an upstream failure (504), not as the 422 used for addresses that can't be geocoded, because the address may be fine. |
 | 7 | No warehouse can fill the order | TX1 rolled back, key COMPLETED (409) | 409 + shortfall | – |
 | 8 | DB error / crash during TX1 | TX1 rolled back, key deleted (or left IN_PROGRESS until the lock lapses) | 500 | retry starts over |
+| 8a | Stock row locked longer than `lock_timeout` (5s) | TX1 rolled back, key deleted | 503 DATABASE_BUSY + `Retry-After` | retry with the same key |
+| 8b | Session killed mid-transaction: idle-in-transaction timeout (25P03), `pg_terminate_backend` or a DB restart (57P01) | transaction rolled back by Postgres; the broken connection is discarded, the process keeps running | 503 DATABASE_BUSY for 25P03, 500 otherwise | retry with the same key (starts over before an order exists, resumes it after) |
 | 9 | Crash after TX1, before charging | order PENDING, key IN_PROGRESS | connection dropped | Retry after the lock lapses → takeover → charge. No retry → sweeper EXPIRED → reconciler finds NOT_FOUND → key 409 ORDER_EXPIRED. |
 | 10 | Card declined | PAYMENT_FAILED, reservations RELEASED | 402 | – |
 | 11 | Provider 4xx other than 402 | PAYMENT_FAILED | 502 PAYMENT_REJECTED | – |
@@ -142,7 +147,7 @@ A **lease** is how the reconciler avoids holding a transaction open during HTTP.
 | 21 | Outbox delivery fails | row unpublished | – | Poller retries next tick. |
 | 22 | Two API instances | – | – | `SKIP LOCKED`, leases and conditional updates keep the jobs from duplicating work. |
 
-Scenarios 1–7, 10, 12–15 and 17–19 were exercised against the running stack by stopping the payment-mock container, killing the API mid-request, and moving `expires_at` / `locked_until` / `updated_at` in SQL. Scenarios 8, 9, 11, 16, 20 and 21 go through the same code paths but were not individually injected.
+Scenarios 1–7, 8a, 10, 12–15 and 17–19 were exercised against the running stack by stopping the payment-mock container, killing the API mid-request, and moving `expires_at` / `locked_until` / `updated_at` in SQL. Scenario 8b was exercised with a script that kills a checked-out session through `withTransaction`; without the guard the same kill exits the process. Scenarios 8, 9, 11, 16, 20 and 21 go through the same code paths but were not individually injected.
 
 ## 8. Known gaps
 
@@ -150,4 +155,6 @@ Scenarios 1–7, 10, 12–15 and 17–19 were exercised against the running stac
 - **The stored 202 doesn't change.** A key completed as 202 keeps replaying 202 after the reconciler settles the order. Clients are told to poll `GET /orders/:id`, which is the source of truth. Updating the stored response would make keys mutable; we chose not to.
 - **No clean-up** of old idempotency keys, released/expired reservations, or published outbox rows. Production would add TTL deletes or table partitioning.
 - **Re-reserve can switch warehouses.** It reruns the full candidate search, so an order paid against Chicago could ship from New York instead of being refunded. That is intentional, but `warehouse_id` on an order can change.
+- **57014 is not only a timeout.** `query_canceled` is also raised when an operator cancels a query (`pg_cancel_backend`). Such a cancel is reported as a retryable 503, so the client may simply retry the work. Accepted as reasonable.
+- **The lock window does not cover the slowest possible request.** Geocoding + TX1 + payment budget + a 5s lock wait in TX2 can exceed 19.6s. That is safe: once TX1 has committed the key points at the order, so a takeover resumes it and every write is conditional. What must fit in the window is everything *before* TX1 commits, which is why a lock timeout fails TX1 instead of trying the next warehouse.
 - **First reconcile is delayed by the lease.** A new `PAYMENT_UNKNOWN` order waits about 30s before its first lookup.

@@ -1,0 +1,47 @@
+@startuml components
+title Components and connectors
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+left to right direction
+
+actor Client
+
+node "API (Fastify, Node 22)" as api {
+  component "routes/\norders, health" as routes
+  component "services/\ncreateOrder, reserveStock,\nsettlePayment, confirmOrder,\nfailOrder, reReserveOrder,\nrefundOrder" as services
+  component "services/ jobs\nsweeper, reconciler,\noutboxPoller" as jobs
+  component "services/\ndeliveryConsumer (stub)" as delivery
+  component "repositories/\nall SQL" as repos
+  component "db/\npool (session timeouts),\nwithTransaction, pg error codes" as db
+  component "geocoder/\nGeocoder + MockGeocoder" as geocoder
+  component "payments/\nPaymentGateway +\nHttpPaymentGateway" as gateway
+}
+
+node "Payment mock (Fastify)" as mock {
+  component "POST /payments\nGET /payments/:key\nPOST /payments/:key/refund" as mockApi
+}
+
+database "PostgreSQL + PostGIS" as pg {
+  folder "public" {
+    component "orders, order_items,\nstock_reservations,\nwarehouse_stock, warehouses,\nproducts, customers,\npayment_attempts,\nidempotency_keys, outbox" as publicSchema
+  }
+  folder "payment_mock" {
+    component "payments" as mockSchema
+  }
+}
+
+Client --> routes : HTTP/JSON\nIdempotency-Key
+routes --> services : call
+jobs --> services : call\n(settle, refund)
+jobs --> delivery : OrderPaid event\n(in-process)
+services --> geocoder : geocode()\n(timeout, no tx)
+services --> gateway : charge / lookup / refund\n(no tx)
+services --> repos : call
+jobs --> repos : call
+repos --> db : query
+db --> publicSchema : SQL (pg pool)
+gateway --> mockApi : HTTP/JSON\nper-call timeout,\nIdempotency-Key = orderId
+mockApi --> mockSchema : SQL
+
+@enduml

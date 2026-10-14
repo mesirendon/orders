@@ -1,0 +1,70 @@
+@startuml sequence-payment-uncertainty
+title POST /orders: payment timeouts, unknown outcome, expired reservation and refund
+
+autonumber
+skinparam shadowing false
+skinparam sequenceMessageAlign left
+
+actor Client
+participant "settlePayment" as Svc
+participant "reReserveOrder /\nrefundOrder" as Rr
+participant "HttpPaymentGateway" as Gw
+participant "Payment mock" as Mock
+database "PostgreSQL" as DB
+
+note over Client, DB : TX1 has committed: order PENDING with ACTIVE reservations
+
+loop 3 attempts
+  Svc -> Gw : charge(orderId)
+  Gw -> Mock : POST /payments (Idempotency-Key: orderId)
+  Mock --> Gw : no answer within 3s
+  Gw --> Svc : PaymentUnavailableError(timeout)
+end
+
+Svc -> Gw : lookup(orderId)
+Gw -> Mock : GET /payments/{orderId}
+
+alt SUCCEEDED (card 1111)
+  Mock --> Gw : SUCCEEDED
+  Svc -> DB : TX2 confirmOrder
+  alt reservations still valid
+    DB --> Svc : all rows confirmed, order PAID
+    Svc --> Client : 201
+  else reservations lapsed or order EXPIRED
+    DB --> Svc : rollback (RESERVATION_EXPIRED)
+    Svc -> Rr : reReserveOrRefund
+    group re-reserve transaction
+      Rr -> DB : BEGIN; SELECT ... FROM orders FOR UPDATE
+      Rr -> DB : UPDATE stock_reservations SET status = 'EXPIRED' WHERE ACTIVE
+      Rr -> DB : INSERT payment_attempts (SUCCEEDED)
+      Rr -> DB : candidate search + SAVEPOINT + FOR UPDATE + recheck
+      alt a warehouse has the stock
+        Rr -> DB : INSERT reservations (CONFIRMED), decrement on_hand,\norder PAID, outbox OrderPaid, key COMPLETED 201; COMMIT
+        Rr --> Client : 201
+      else stock gone
+        Rr -> DB : UPDATE orders SET status = 'REFUND_PENDING'; COMMIT
+        Rr -> Gw : refund(orderId, "refund:{orderId}")
+        Gw -> Mock : POST /payments/{orderId}/refund
+        alt refund ok
+          Rr -> DB : BEGIN; REFUND_PENDING -> CANCELLED,\nINSERT payment_attempts (REFUNDED), key COMPLETED 409; COMMIT
+          Rr --> Client : 409 ORDER_CANCELLED (refund COMPLETED)
+        else refund fails
+          Rr -> DB : key COMPLETED 409 (refund PENDING)
+          Rr --> Client : 409 ORDER_CANCELLED (refund PENDING)
+          note right : reconciler retries the refund
+        end
+      end
+    end
+  end
+else NOT_FOUND (card 2222)
+  Mock --> Gw : NOT_FOUND
+  Svc -> DB : failOrder: PAYMENT_FAILED, reservations RELEASED,\nattempt FAILED, key COMPLETED 504
+  Svc --> Client : 504 PAYMENT_UNAVAILABLE (not charged)
+else lookup fails (provider down)
+  Gw --> Svc : PaymentUnavailableError
+  Svc -> DB : BEGIN; order PAYMENT_UNKNOWN, attempt UNKNOWN,\nkey COMPLETED 202; COMMIT
+  Svc --> Client : 202 { orderId, status: PAYMENT_UNKNOWN }
+  note right : reconciler resolves later
+end
+
+@enduml

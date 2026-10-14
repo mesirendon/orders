@@ -11,7 +11,11 @@ import type { Deps } from './services/types.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const pool = createPool(config.DATABASE_URL);
+  const pool = createPool(config.DATABASE_URL, {
+    lockTimeoutMs: config.DB_LOCK_TIMEOUT_MS,
+    statementTimeoutMs: config.DB_STATEMENT_TIMEOUT_MS,
+    idleInTransactionTimeoutMs: config.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+  });
   const deps: Deps = {
     pool,
     config,

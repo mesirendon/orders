@@ -1,0 +1,53 @@
+@startuml deployment
+title Deployment (docker compose)
+
+skinparam shadowing false
+
+actor "Client / curl /\nscripts" as client
+
+node "Docker host" {
+  node "postgres\n<<container>>\npostgis/postgis:16-3.4\n(linux/amd64)" as pg {
+    database "canals DB\nschemas: public, payment_mock" as db
+  }
+  storage "pgdata\n<<volume>>" as vol
+
+  node "migrate\n<<one-shot container>>\ncanals-api image\nnode dist/db/migrate.js" as migrate
+  node "seed\n<<one-shot container>>\ncanals-api image\nnode dist/db/seed.js" as seed
+
+  node "api\n<<container>>\ncanals-api image\nnode dist/server.js\n:3000, healthcheck GET /health" as api {
+    component "HTTP routes" as routes
+    component "sweeper / reconciler /\noutbox poller (setInterval)" as jobs
+  }
+
+  node "payment-mock\n<<container>>\ncanals-payment-mock image\n:4000, healthcheck GET /health" as mock
+}
+
+client --> api : HTTP :3000
+client ..> mock : HTTP :4000 (inspection)
+db -- vol
+migrate --> db : SQL (advisory lock,\nschema_migrations)
+seed --> db : SQL (ON CONFLICT DO NOTHING)
+api --> db : SQL (pg pool, 10 conns,\nlock 5s / statement 10s /\nidle-in-tx 30s timeouts)
+api --> mock : HTTP (3s timeout)
+mock --> db : SQL (own schema)
+
+note right of migrate
+  Start-up order (depends_on):
+  1. postgres: service_healthy (pg_isready)
+  2. migrate: completed_successfully
+  3. seed: completed_successfully
+  4. api
+  payment-mock only waits for postgres
+  docker compose up --wait returns once
+  api and payment-mock are healthy
+end note
+
+note as production
+  Production mapping (see README):
+  API -> ECS/Fargate or Lambda + API Gateway (CDK)
+  jobs -> EventBridge Scheduler -> Lambda
+  postgres -> RDS / Aurora PostgreSQL + PostGIS behind RDS Proxy
+  outbox -> EventBridge bus
+end note
+
+@enduml

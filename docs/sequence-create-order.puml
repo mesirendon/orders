@@ -1,0 +1,81 @@
+@startuml sequence-create-order
+title POST /orders: happy path and decline
+
+autonumber
+skinparam shadowing false
+skinparam sequenceMessageAlign left
+
+actor Client
+participant "routes/orders" as Route
+participant "createOrder /\nsettlePayment" as Svc
+participant "MockGeocoder" as Geo
+participant "HttpPaymentGateway" as Gw
+participant "Payment mock" as Mock
+database "PostgreSQL" as DB
+
+Client -> Route : POST /orders\nIdempotency-Key: k
+Route -> Route : zod validation (422 on failure)
+Route -> Svc : createOrder(input)
+Svc -> Svc : request_hash = sha256(customer, address,\nsorted items, card last4)
+
+Svc -> DB : INSERT INTO idempotency_keys ... ON CONFLICT DO NOTHING RETURNING
+DB --> Svc : row (we own the key)
+
+Svc -> Geo : geocode(address) [timeout 2s]
+Geo --> Svc : lat/lng
+
+group TX1 reserveStock
+  Svc -> DB : BEGIN
+  Svc -> DB : SELECT prices FROM products
+  Svc -> DB : candidate warehouses stocking every item\nORDER BY ST_Distance
+  loop each candidate, nearest first
+    Svc -> DB : SAVEPOINT candidate
+    Svc -> DB : SELECT ... FROM warehouse_stock\nWHERE warehouse_id = $1 AND product_id = ANY($2)\nORDER BY product_id FOR UPDATE
+    note right : lock_timeout 5s: the whole TX1 rolls back\n-> 503 DATABASE_BUSY, key released\n(no skip to the next candidate)
+    Svc -> DB : SELECT sum(quantity) FROM stock_reservations\nWHERE ACTIVE AND expires_at > now()
+    alt enough stock
+      Svc -> DB : RELEASE SAVEPOINT candidate
+    else not enough
+      Svc -> DB : ROLLBACK TO SAVEPOINT candidate (locks released)
+    end
+  end
+  Svc -> DB : INSERT orders (PENDING), order_items (price snapshot),\nstock_reservations (ACTIVE, expires_at = now() + TTL)
+  Svc -> DB : UPDATE idempotency_keys SET order_id
+  Svc -> DB : COMMIT
+end
+
+loop up to 3 attempts, backoff 200ms, 400ms (timeout / network / 5xx only)
+  Svc -> Gw : charge(orderId, card, amount)
+  Gw -> Mock : POST /payments\nIdempotency-Key: orderId [timeout 3s]
+  Mock --> Gw : 201 SUCCEEDED | 402 DECLINED
+end
+
+alt approved
+  group TX2 confirmOrder
+    Svc -> DB : BEGIN
+    Svc -> DB : SELECT ... FROM orders WHERE id = $1 FOR UPDATE
+    Svc -> DB : SELECT ... FROM warehouse_stock ... ORDER BY product_id FOR UPDATE
+    Svc -> DB : UPDATE stock_reservations SET status = 'CONFIRMED'\nWHERE order_id = $1 AND status = 'ACTIVE'\nAND expires_at > clock_timestamp()
+    note right : rows = items, otherwise roll back\nand go to re-reserve
+    Svc -> DB : UPDATE warehouse_stock SET on_hand = on_hand - quantity
+    Svc -> DB : UPDATE orders SET status = 'PAID'
+    Svc -> DB : INSERT payment_attempts (SUCCEEDED, last4)
+    Svc -> DB : INSERT outbox (OrderPaid)
+    Svc -> DB : UPDATE idempotency_keys SET status = 'COMPLETED',\nresponse_status = 201, response_body
+    Svc -> DB : COMMIT
+  end
+  Svc --> Route : 201 order
+else declined
+  group failOrder
+    Svc -> DB : BEGIN
+    Svc -> DB : UPDATE orders SET status = 'PAYMENT_FAILED'
+    Svc -> DB : UPDATE stock_reservations SET status = 'RELEASED'
+    Svc -> DB : INSERT payment_attempts (DECLINED)
+    Svc -> DB : UPDATE idempotency_keys ... COMPLETED, 402
+    Svc -> DB : COMMIT
+  end
+  Svc --> Route : 402 PAYMENT_DECLINED
+end
+Route --> Client : response
+
+@enduml

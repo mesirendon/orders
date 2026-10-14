@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { FOREIGN_KEY_VIOLATION, pgErrorCode } from '../db/errors.js';
 import { AppError, appErrorBody } from '../errors.js';
 import { GeocodingError, type Address, type Coordinates } from '../geocoder/geocoder.js';
 import {
@@ -62,7 +63,7 @@ async function claimIdempotencyKey(deps: Deps, input: CreateOrderInput, requestH
       config.idempotencyLockMs,
     );
   } catch (err) {
-    if (isForeignKeyViolation(err)) {
+    if (pgErrorCode(err) === FOREIGN_KEY_VIOLATION) {
       throw new AppError(422, 'UNKNOWN_CUSTOMER', 'Customer does not exist');
     }
     throw err;
@@ -170,8 +171,4 @@ async function settleKeyAfterFailure(deps: Deps, input: CreateOrderInput, err: u
 
 function requestInProgress(): AppError {
   return new AppError(409, 'REQUEST_IN_PROGRESS', 'A request with this Idempotency-Key is being processed');
-}
-
-function isForeignKeyViolation(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'code' in err && err.code === '23503';
 }

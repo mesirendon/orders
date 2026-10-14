@@ -1,0 +1,42 @@
+@startuml sequence-idempotency
+title Idempotency: replay, conflict and takeover after a crash
+
+autonumber
+skinparam shadowing false
+skinparam sequenceMessageAlign left
+
+actor Client
+participant "API instance A" as A
+participant "API instance B" as B
+participant "Payment mock" as Mock
+database "PostgreSQL" as DB
+
+Client -> A : POST /orders (key k)
+A -> DB : INSERT idempotency_keys ... ON CONFLICT DO NOTHING RETURNING
+DB --> A : row, locked_until = now() + 19.6s
+A -> DB : TX1 (order PENDING, key.order_id set)
+A -> Mock : POST /payments (Idempotency-Key: orderId)
+Mock -> Mock : record SUCCEEDED
+A -[#red]x A : process crashes before TX2
+
+Client -> B : retry POST /orders (key k, same body)
+B -> DB : INSERT ... ON CONFLICT DO NOTHING RETURNING
+DB --> B : no row (conflict)
+B -> DB : SELECT ... FROM idempotency_keys
+alt request_hash differs
+  B --> Client : 422 IDEMPOTENCY_KEY_REUSED
+else status COMPLETED
+  B --> Client : stored status + body
+else IN_PROGRESS and locked_until > now()
+  B --> Client : 409 REQUEST_IN_PROGRESS
+else IN_PROGRESS and lock expired
+  B -> DB : UPDATE idempotency_keys SET locked_until = now() + window\nWHERE status = 'IN_PROGRESS' AND locked_until <= now()\nRETURNING order_id
+  note right : conditional UPDATE: only one retry wins
+  B -> DB : SELECT order -> PENDING
+  B -> Mock : POST /payments (Idempotency-Key: orderId)
+  Mock --> B : stored SUCCEEDED (no second charge)
+  B -> DB : TX2 confirmOrder -> PAID, key COMPLETED 201
+  B --> Client : 201
+end
+
+@enduml

@@ -14,10 +14,10 @@ The design (transaction boundaries, locking, idempotency and the failure matrix)
 ## Running it
 
 ```bash
-docker compose up --build
+docker compose up --build            # or: docker compose up --build -d --wait (returns once api and payment-mock are healthy)
 ```
 
-Startup order: `postgres` (healthcheck) → `migrate` → `seed` → `api`. The `payment-mock` service only depends on postgres.
+Startup order: `postgres` (healthcheck) → `migrate` → `seed` → `api`. The `payment-mock` service only depends on postgres. `api` and `payment-mock` each have a healthcheck on `GET /health`, so `docker compose up -d --wait` returns once both are ready.
 
 | Service        | URL                      |
 | -------------- | ------------------------ |
@@ -80,6 +80,7 @@ The amount charged is always computed on the server from `products.price_cents`.
 | 422 | `IDEMPOTENCY_KEY_REUSED` | Same key, different request body. |
 | 422 | `GEOCODING_FAILED` | Address could not be geocoded (for example a blank postal code). |
 | 502 / 504 | `PAYMENT_UNAVAILABLE`, `PAYMENT_REJECTED` | The provider failed and confirmed it never charged the card (504 if the last error was a timeout). Order is `PAYMENT_FAILED`. |
+| 503 | `DATABASE_BUSY` | A lock wait, statement or idle transaction exceeded its database timeout. Sent with `Retry-After: 1`. **Retry with the same key, never a new one:** before an order exists the retry starts over; after (for example a timeout in the confirm step, once the card is charged) it resumes the same order without charging again. A new key would create a second order and a second charge. |
 | 504 | `GEOCODER_TIMEOUT` | Geocoder timed out. Nothing is stored, so a retry with the same key starts over. |
 
 Errors share one shape: `{ "error": { "code", "message", "details"? } }`.
@@ -137,6 +138,7 @@ To get a **202**, run `docker compose stop payment-mock`, place an order, then `
 ## Trying it out
 
 ```bash
+docker compose up --build -d --wait    # stack up and healthy
 npm install                            # once, for the scripts
 npm run demo                           # curl walkthrough of every card prefix and error case
 npm run concurrency -- --reset         # 20 parallel orders for the stock-1 product; exactly one wins
@@ -219,7 +221,7 @@ src/
   repositories/  all SQL
   geocoder/      Geocoder interface + MockGeocoder
   payments/      PaymentGateway interface + HttpPaymentGateway
-  db/            pool, withTransaction, migration and seed runners
+  db/            pool (session timeouts), withTransaction, pg error codes, migration and seed runners
 migrations/      numbered .sql files, applied once
 seed/            idempotent seed data
 payment-mock/    separate Fastify service (own package and Dockerfile)
@@ -229,7 +231,7 @@ docs/            PlantUML diagrams
 
 ## Configuration
 
-All configuration comes from environment variables, validated with zod at startup. The API refuses to start if they are invalid, or if `RESERVATION_TTL_SECONDS` is not longer than the payment budget (`attempts × timeout + backoff + one status lookup` = 12.6s with the defaults).
+All configuration comes from environment variables, validated with zod at startup. The API refuses to start if they are invalid, if the database timeouts are not ordered `DB_LOCK_TIMEOUT_MS < DB_STATEMENT_TIMEOUT_MS < DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, or if `RESERVATION_TTL_SECONDS` is not longer than the payment budget (`attempts × timeout + backoff + one status lookup` = 12.6s with the defaults).
 
 | Variable | Default | |
 | -------- | ------- | - |
@@ -245,6 +247,9 @@ All configuration comes from environment variables, validated with zod at startu
 | `SWEEP_INTERVAL_MS` | 5000 | |
 | `RECONCILE_INTERVAL_MS` | 10000 | |
 | `OUTBOX_INTERVAL_MS` | 2000 | |
+| `DB_LOCK_TIMEOUT_MS` | 5000 | max wait for a row lock (API pool only) |
+| `DB_STATEMENT_TIMEOUT_MS` | 10000 | max duration of one statement (API pool only) |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 30000 | Postgres kills a session that sits idle inside a transaction, releasing its locks |
 
 The idempotency lock window is derived: geocoder timeout + payment budget + 5s ≈ 19.6s.
 
@@ -260,6 +265,7 @@ The short version; [DESIGN.md](DESIGN.md) has the details.
 - **Idempotency in two layers.** Client requests are deduplicated by `(customer_id, Idempotency-Key)` using `INSERT … ON CONFLICT DO NOTHING`. Payments are deduplicated by the order ID, which is the payment idempotency key. A retry, a takeover after a crash, or the reconciler can therefore safely "charge again".
 - **A timeout means "unknown", not "failed".** After the retries run out, the API asks the provider what happened before deciding. If it can't even ask, the order is parked as `PAYMENT_UNKNOWN` (202) and a background job resolves it.
 - **Write the intent before the side effect.** An order moves to `REFUND_PENDING` before the refund is called, so a crash in between is recovered by the reconciler.
+- **Bounded waits.** The API's connections set `lock_timeout`, `statement_timeout` and `idle_in_transaction_session_timeout`. A stalled transaction can't block other orders for the same products indefinitely: waiters get a retryable 503, and Postgres kills the stuck session. Killing a session can't crash the API: `withTransaction` listens for connection errors while it holds a client, and the pool discards the broken connection.
 - **Background jobs use `SKIP LOCKED`** plus an `updated_at` lease. Several API instances can run them at the same time without doing the same work twice.
 - **Transactional outbox.** The `OrderPaid` event is written in the same transaction that marks the order paid, and a poller publishes it at least once.
 - **No ORM, no DI container.** Every lock, transaction and conditional update is plain SQL you can read in `src/repositories`.

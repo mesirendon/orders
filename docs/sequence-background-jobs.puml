@@ -1,0 +1,55 @@
+@startuml sequence-background-jobs
+title Background jobs: sweeper, reconciler, outbox poller
+
+autonumber
+skinparam shadowing false
+skinparam sequenceMessageAlign left
+
+participant "Sweeper\n(every 5s)" as Sweep
+participant "Reconciler\n(every 10s)" as Rec
+participant "Outbox poller\n(every 2s)" as Out
+participant "Delivery consumer\n(stub)" as Del
+participant "Payment mock" as Mock
+database "PostgreSQL" as DB
+
+group sweeper tick (one transaction)
+  Sweep -> DB : SELECT o.id FROM orders o WHERE status IN ('PENDING','PAYMENT_UNKNOWN')\nAND EXISTS (lapsed ACTIVE reservation)\nFOR UPDATE OF o SKIP LOCKED
+  Sweep -> DB : UPDATE stock_reservations SET status = 'EXPIRED'\nWHERE order_id = ANY($1) AND ACTIVE AND expires_at <= now()
+  Sweep -> DB : UPDATE orders SET status = 'EXPIRED' WHERE id = ANY($1) AND status = 'PENDING'
+end
+
+group reconciler tick
+  Rec -> DB : UPDATE orders SET updated_at = now() WHERE id IN (\n  SELECT id ... status = 'PAYMENT_UNKNOWN' AND updated_at <= now() - 30s\n  FOR UPDATE SKIP LOCKED) RETURNING id
+  note right : lease: claimed rows are invisible\nto other instances for 30s
+  loop each claimed order (no transaction held)
+    Rec -> Mock : GET /payments/{orderId}
+    alt SUCCEEDED
+      Rec -> DB : TX2 confirm, or re-reserve / refund
+    else DECLINED / NOT_FOUND
+      Rec -> DB : failOrder: PAYMENT_FAILED, reservations RELEASED
+    else provider down
+      Rec -> Rec : skip, retry after the lease
+    end
+  end
+  Rec -> DB : claim REFUND_PENDING orders (same lease pattern)
+  loop each
+    Rec -> Mock : POST /payments/{orderId}/refund (refund:{orderId})
+    Rec -> DB : REFUND_PENDING -> CANCELLED, attempt REFUNDED
+  end
+  Rec -> DB : take over abandoned keys: IN_PROGRESS, lock expired, order EXPIRED
+  loop each
+    Rec -> Mock : GET /payments/{orderId}
+    Rec -> DB : charged -> re-reserve / refund; otherwise key COMPLETED 409
+  end
+end
+
+group outbox tick (one transaction)
+  Out -> DB : SELECT ... FROM outbox WHERE published_at IS NULL\nORDER BY id LIMIT 50 FOR UPDATE SKIP LOCKED
+  loop each event
+    Out -> Del : deliverToShipping(OrderPaid)
+    Del -> Del : log "shipment requested"
+  end
+  Out -> DB : UPDATE outbox SET published_at = now() WHERE id = ANY(delivered)
+end
+
+@enduml

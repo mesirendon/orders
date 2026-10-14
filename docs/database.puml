@@ -1,0 +1,151 @@
+@startuml database
+title Database schema (class diagram)
+
+skinparam shadowing false
+hide methods
+hide stereotypes
+
+package "public" {
+  class customers {
+    + id : uuid <<PK>>
+    name : text
+    email : text <<unique>>
+    created_at : timestamptz
+  }
+
+  class products {
+    + id : uuid <<PK>>
+    name : text
+    {field} price_cents : integer (> 0)
+    created_at : timestamptz
+  }
+
+  class warehouses {
+    + id : uuid <<PK>>
+    name : text
+    {field} location : geography(Point, 4326) <<GiST>>
+    created_at : timestamptz
+  }
+
+  class warehouse_stock {
+    + warehouse_id : uuid <<PK, FK>>
+    + product_id : uuid <<PK, FK>>
+    {field} on_hand : integer (>= 0)
+    updated_at : timestamptz
+  }
+
+  class orders {
+    + id : uuid <<PK>>
+    customer_id : uuid <<FK>>
+    status : text
+    warehouse_id : uuid <<FK>>
+    {field} total_cents : integer (> 0)
+    shipping_line1 : text
+    shipping_city : text
+    shipping_postal_code : text
+    shipping_country : text
+    {field} shipping_location : geography(Point, 4326)
+    created_at : timestamptz
+    updated_at : timestamptz
+    --
+    idx (customer_id, created_at desc)
+    partial idx (status, updated_at)
+      WHERE status IN (PENDING, PAYMENT_UNKNOWN, REFUND_PENDING)
+  }
+
+  class order_items {
+    + order_id : uuid <<PK, FK>>
+    + product_id : uuid <<PK, FK>>
+    {field} quantity : integer (> 0)
+    {field} unit_price_cents : integer (snapshot)
+  }
+
+  class stock_reservations {
+    + id : bigint <<PK, identity>>
+    order_id : uuid <<FK>>
+    warehouse_id : uuid <<FK>>
+    product_id : uuid <<FK>>
+    {field} quantity : integer (> 0)
+    status : ACTIVE | CONFIRMED | RELEASED | EXPIRED
+    expires_at : timestamptz
+    created_at : timestamptz
+    updated_at : timestamptz
+    --
+    partial idx (warehouse_id, product_id) WHERE ACTIVE
+    partial idx (expires_at) WHERE ACTIVE
+    idx (order_id)
+  }
+
+  class payment_attempts {
+    + id : bigint <<PK, identity>>
+    order_id : uuid <<FK>>
+    idempotency_key : text
+    status : SUCCEEDED | DECLINED | FAILED | UNKNOWN | REFUNDED
+    {field} card_last4 : char(4)
+    processor_payment_id : text
+    {field} amount_cents : integer (> 0)
+    error : text
+    created_at : timestamptz
+  }
+
+  class idempotency_keys {
+    + customer_id : uuid <<PK, FK>>
+    + key : text <<PK>>
+    request_hash : text
+    status : IN_PROGRESS | COMPLETED
+    locked_until : timestamptz
+    order_id : uuid <<FK, nullable>>
+    response_status : integer
+    response_body : jsonb
+    created_at : timestamptz
+    updated_at : timestamptz
+    --
+    partial idx (order_id) WHERE order_id IS NOT NULL
+  }
+
+  class outbox {
+    + id : bigint <<PK, identity>>
+    aggregate_id : uuid
+    type : text
+    payload : jsonb
+    created_at : timestamptz
+    published_at : timestamptz <<nullable>>
+    --
+    partial idx (id) WHERE published_at IS NULL
+  }
+
+  class schema_migrations {
+    + name : text <<PK>>
+    applied_at : timestamptz
+  }
+}
+
+package "payment_mock" {
+  class payments {
+    + idempotency_key : text <<PK>>
+    payment_id : uuid <<unique>>
+    status : SUCCEEDED | DECLINED
+    amount_cents : integer
+    {field} card_last4 : char(4)
+    description : text
+    refund_idempotency_key : text
+    refunded_at : timestamptz
+    created_at : timestamptz
+  }
+}
+
+customers "1" -- "0..*" orders
+customers "1" -- "0..*" idempotency_keys
+warehouses "1" -- "0..*" warehouse_stock
+products "1" -- "0..*" warehouse_stock
+warehouses "1" -- "0..*" orders : fulfils
+orders "1" *-- "1..*" order_items
+products "1" -- "0..*" order_items
+orders "1" -- "0..*" stock_reservations
+warehouse_stock "1" -- "0..*" stock_reservations : (warehouse_id, product_id)
+orders "1" -- "0..*" payment_attempts
+orders "0..1" -- "0..1" idempotency_keys
+orders "1" .. "0..*" outbox : aggregate_id\n(no FK)
+orders "1" .. "0..1" payments : idempotency_key = order id\n(other service, no FK)
+
+@enduml

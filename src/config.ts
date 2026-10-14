@@ -13,6 +13,9 @@ const envSchema = z.object({
   SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(10000),
   OUTBOX_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
+  DB_LOCK_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
 });
 
 export type Config = z.infer<typeof envSchema> & { paymentBudgetMs: number; idempotencyLockMs: number };
@@ -37,6 +40,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (values.RESERVATION_TTL_SECONDS * 1000 <= paymentBudgetMs) {
     throw new Error(
       `RESERVATION_TTL_SECONDS (${values.RESERVATION_TTL_SECONDS}s) must exceed the payment budget (${paymentBudgetMs}ms)`,
+    );
+  }
+
+  if (
+    values.DB_LOCK_TIMEOUT_MS >= values.DB_STATEMENT_TIMEOUT_MS ||
+    values.DB_STATEMENT_TIMEOUT_MS >= values.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS
+  ) {
+    throw new Error(
+      'Database timeouts must satisfy DB_LOCK_TIMEOUT_MS < DB_STATEMENT_TIMEOUT_MS < DB_IDLE_IN_TRANSACTION_TIMEOUT_MS',
     );
   }
 

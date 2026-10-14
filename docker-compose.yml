@@ -1,0 +1,64 @@
+x-api-env: &api-env
+  DATABASE_URL: postgres://canals:canals@postgres:5432/canals
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: canals
+      POSTGRES_PASSWORD: canals
+      POSTGRES_DB: canals
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U canals -d canals"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  migrate:
+    build: .
+    image: canals-api
+    command: ["node", "dist/db/migrate.js"]
+    environment:
+      <<: *api-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    build: .
+    image: canals-api
+    command: ["node", "dist/db/seed.js"]
+    environment:
+      <<: *api-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    build: .
+    image: canals-api
+    stop_grace_period: 30s
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *api-env
+      PORT: "3000"
+      LOG_LEVEL: info
+      PAYMENT_BASE_URL: http://payment-mock:4000
+      PAYMENT_TIMEOUT_MS: "3000"
+      PAYMENT_MAX_ATTEMPTS: "3"
+      PAYMENT_BACKOFF_MS: "200"
+      RESERVATION_TTL_SECONDS: "120"
+      SWEEP_INTERVAL_MS: "5000"
+      RECONCILE_INTERVAL_MS: "10000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

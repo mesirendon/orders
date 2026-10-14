@@ -1,11 +1,18 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createPool } from './db/pool.js';
+import { MockGeocoder } from './geocoder/mockGeocoder.js';
+import { HttpPaymentGateway } from './payments/httpPaymentGateway.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const pool = createPool(config.DATABASE_URL);
-  const app = buildApp(config, pool);
+  const app = buildApp({
+    pool,
+    config,
+    geocoder: new MockGeocoder(),
+    payments: new HttpPaymentGateway(config.PAYMENT_BASE_URL, config.PAYMENT_TIMEOUT_MS),
+  });
 
   pool.on('error', (err) => app.log.error({ err }, 'idle postgres client error'));
 

@@ -8,12 +8,15 @@ const envSchema = z.object({
   PAYMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
   PAYMENT_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
   PAYMENT_BACKOFF_MS: z.coerce.number().int().min(0).default(200),
+  GEOCODER_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   RESERVATION_TTL_SECONDS: z.coerce.number().int().positive().default(120),
   SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(10000),
 });
 
-export type Config = z.infer<typeof envSchema> & { paymentBudgetMs: number };
+export type Config = z.infer<typeof envSchema> & { paymentBudgetMs: number; idempotencyLockMs: number };
+
+const DATABASE_WORK_MARGIN_MS = 5000;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = envSchema.safeParse(env);
@@ -36,5 +39,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
-  return { ...values, paymentBudgetMs };
+  const idempotencyLockMs = values.GEOCODER_TIMEOUT_MS + paymentBudgetMs + DATABASE_WORK_MARGIN_MS;
+
+  return { ...values, paymentBudgetMs, idempotencyLockMs };
 }

@@ -83,12 +83,12 @@ export class HttpPaymentGateway implements PaymentGateway {
       });
       body = parseBody(await response.text());
     } catch (err) {
-      const reason = err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'network error';
-      throw new PaymentUnavailableError(`${method} ${path}: ${reason}`);
+      const reason = err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'network';
+      throw new PaymentUnavailableError(reason, `${method} ${path}: ${reason}`);
     }
 
     if (response.status >= 500) {
-      throw new PaymentUnavailableError(`${method} ${path}: upstream status ${response.status}`);
+      throw new PaymentUnavailableError('server', `${method} ${path}: upstream status ${response.status}`);
     }
     return { status: response.status, body };
   }

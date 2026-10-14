@@ -111,6 +111,10 @@ export async function updateOrderStatus(
   return result.rowCount === 1;
 }
 
+export async function updateOrderWarehouse(db: Db, orderId: string, warehouseId: string): Promise<void> {
+  await db.query('UPDATE orders SET warehouse_id = $2, updated_at = now() WHERE id = $1', [orderId, warehouseId]);
+}
+
 export async function findOrder(db: Db, orderId: string): Promise<OrderRecord | undefined> {
   const { rows } = await db.query<{
     id: string;

@@ -67,10 +67,45 @@ export async function completeIdempotencyKey(
   );
 }
 
+export async function takeOverIdempotencyKey(
+  db: Db,
+  customerId: string,
+  key: string,
+  lockMs: number,
+): Promise<IdempotencyKeyRow | undefined> {
+  const { rows } = await db.query<IdempotencyKeyRow>(
+    `UPDATE idempotency_keys
+     SET locked_until = now() + make_interval(secs => $3 / 1000.0), updated_at = now()
+     WHERE customer_id = $1 AND key = $2 AND status = 'IN_PROGRESS' AND locked_until <= now()
+     RETURNING ${COLUMNS}`,
+    [customerId, key, lockMs],
+  );
+  return rows[0];
+}
+
+export async function completeIdempotencyKeyForOrder(
+  db: Db,
+  orderId: string,
+  responseStatus: number,
+  responseBody: unknown,
+): Promise<void> {
+  await db.query(
+    `UPDATE idempotency_keys
+     SET status = 'COMPLETED', response_status = $2, response_body = $3, updated_at = now()
+     WHERE order_id = $1 AND status = 'IN_PROGRESS'`,
+    [orderId, responseStatus, JSON.stringify(responseBody)],
+  );
+}
+
 export async function releaseIdempotencyKey(db: Db, customerId: string, key: string): Promise<void> {
   await db.query(
     `DELETE FROM idempotency_keys
      WHERE customer_id = $1 AND key = $2 AND status = 'IN_PROGRESS' AND order_id IS NULL`,
+    [customerId, key],
+  );
+  await db.query(
+    `UPDATE idempotency_keys SET locked_until = now(), updated_at = now()
+     WHERE customer_id = $1 AND key = $2 AND status = 'IN_PROGRESS'`,
     [customerId, key],
   );
 }

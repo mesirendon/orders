@@ -39,15 +39,8 @@ export async function reserveStock(pool: pg.Pool, input: ReserveStockInput): Pro
       throw new AppError(422, 'UNKNOWN_PRODUCT', 'Some products do not exist', { productIds: unknownProductIds });
     }
 
-    const candidates = await findCandidateWarehouses(tx, input.items, input.shippingLocation);
-    for (const candidate of candidates) {
-      await tx.query('SAVEPOINT candidate');
-      if (!(await hasAvailableStock(tx, candidate.warehouseId, input.items))) {
-        await tx.query('ROLLBACK TO SAVEPOINT candidate');
-        continue;
-      }
-      await tx.query('RELEASE SAVEPOINT candidate');
-
+    const warehouseId = await lockFirstAvailableWarehouse(tx, input.items, input.shippingLocation);
+    if (warehouseId) {
       const orderItems = input.items.map((item) => ({
         productId: item.productId,
         quantity: item.quantity,
@@ -58,16 +51,16 @@ export async function reserveStock(pool: pg.Pool, input: ReserveStockInput): Pro
       await insertOrder(tx, {
         id: input.orderId,
         customerId: input.customerId,
-        warehouseId: candidate.warehouseId,
+        warehouseId,
         totalCents,
         shippingAddress: input.shippingAddress,
         shippingLocation: input.shippingLocation,
         items: orderItems,
       });
-      await insertReservations(tx, input.orderId, candidate.warehouseId, input.items, input.ttlSeconds);
+      await insertReservations(tx, input.orderId, warehouseId, input.items, input.ttlSeconds, 'ACTIVE');
       await attachOrderToKey(tx, input.customerId, input.idempotencyKey, input.orderId);
 
-      return { orderId: input.orderId, warehouseId: candidate.warehouseId, totalCents };
+      return { orderId: input.orderId, warehouseId, totalCents };
     }
 
     const availability = await findAvailabilityByWarehouse(tx, productIds, input.shippingLocation);
@@ -78,6 +71,23 @@ export async function reserveStock(pool: pg.Pool, input: ReserveStockInput): Pro
       computeShortfall(input.items, availability),
     );
   });
+}
+
+export async function lockFirstAvailableWarehouse(
+  tx: pg.PoolClient,
+  items: RequestedItem[],
+  destination: Coordinates,
+): Promise<string | null> {
+  const candidates = await findCandidateWarehouses(tx, items, destination);
+  for (const candidate of candidates) {
+    await tx.query('SAVEPOINT candidate');
+    if (await hasAvailableStock(tx, candidate.warehouseId, items)) {
+      await tx.query('RELEASE SAVEPOINT candidate');
+      return candidate.warehouseId;
+    }
+    await tx.query('ROLLBACK TO SAVEPOINT candidate');
+  }
+  return null;
 }
 
 async function hasAvailableStock(tx: pg.PoolClient, warehouseId: string, items: RequestedItem[]): Promise<boolean> {

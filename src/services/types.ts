@@ -17,3 +17,13 @@ export interface HttpResult {
   statusCode: number;
   body: unknown;
 }
+
+export interface PaymentContext {
+  orderId: string;
+  cardLast4: string;
+  amountCents: number;
+}
+
+export interface ChargedOrder extends PaymentContext {
+  paymentId: string;
+}

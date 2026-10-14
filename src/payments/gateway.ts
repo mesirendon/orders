@@ -20,10 +20,15 @@ export interface PaymentGateway {
   refund(idempotencyKey: string, refundIdempotencyKey: string): Promise<void>;
 }
 
+export type UnavailableReason = 'timeout' | 'network' | 'server';
+
 export class PaymentUnavailableError extends Error {
-  constructor(message: string) {
+  readonly reason: UnavailableReason;
+
+  constructor(reason: UnavailableReason, message: string) {
     super(message);
     this.name = 'PaymentUnavailableError';
+    this.reason = reason;
   }
 }
 

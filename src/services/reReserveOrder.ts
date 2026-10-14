@@ -10,6 +10,7 @@ import {
 import { insertPaymentAttempt } from '../repositories/paymentAttempts.js';
 import { expireActiveReservationsForOrder, insertReservations } from '../repositories/reservations.js';
 import { decrementOnHandForOrder } from '../repositories/stock.js';
+import { recordOrderPaid } from './orderEvents.js';
 import { paidResponse, responseForOrder } from './orderResponses.js';
 import { refundOrder } from './refundOrder.js';
 import { lockFirstAvailableWarehouse } from './reserveStock.js';
@@ -51,7 +52,9 @@ export async function reReserveOrRefund(deps: Deps, charged: ChargedOrder, log: 
     await updateOrderWarehouse(tx, order.id, warehouseId);
     await updateOrderStatus(tx, order.id, RE_RESERVABLE_STATUSES, 'PAID');
 
-    const response = paidResponse((await findOrder(tx, order.id))!);
+    const paid = (await findOrder(tx, order.id))!;
+    await recordOrderPaid(tx, paid);
+    const response = paidResponse(paid);
     await completeIdempotencyKeyForOrder(tx, order.id, response.statusCode, response.body);
     return { kind: 'SETTLED', response };
   });

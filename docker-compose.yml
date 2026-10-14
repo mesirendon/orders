@@ -57,6 +57,7 @@ services:
       RESERVATION_TTL_SECONDS: "120"
       SWEEP_INTERVAL_MS: "5000"
       RECONCILE_INTERVAL_MS: "10000"
+      OUTBOX_INTERVAL_MS: "2000"
     depends_on:
       seed:
         condition: service_completed_successfully

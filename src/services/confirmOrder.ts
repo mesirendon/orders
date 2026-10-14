@@ -5,6 +5,7 @@ import { findOrder, lockOrder, updateOrderStatus, type OrderStatus } from '../re
 import { insertPaymentAttempt } from '../repositories/paymentAttempts.js';
 import { confirmActiveReservations } from '../repositories/reservations.js';
 import { decrementOnHandForOrder, lockStockRows } from '../repositories/stock.js';
+import { recordOrderPaid } from './orderEvents.js';
 import { paidResponse } from './orderResponses.js';
 import type { ChargedOrder, HttpResult } from './types.js';
 
@@ -43,7 +44,9 @@ export async function confirmOrder(pool: pg.Pool, charged: ChargedOrder): Promis
         error: null,
       });
 
-      const response = paidResponse((await findOrder(tx, charged.orderId))!);
+      const paid = (await findOrder(tx, charged.orderId))!;
+      await recordOrderPaid(tx, paid);
+      const response = paidResponse(paid);
       await completeIdempotencyKeyForOrder(tx, charged.orderId, response.statusCode, response.body);
       return { confirmed: true, response };
     });

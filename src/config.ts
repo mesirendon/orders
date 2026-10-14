@@ -12,6 +12,7 @@ const envSchema = z.object({
   RESERVATION_TTL_SECONDS: z.coerce.number().int().positive().default(120),
   SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(10000),
+  OUTBOX_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
 });
 
 export type Config = z.infer<typeof envSchema> & { paymentBudgetMs: number; idempotencyLockMs: number };

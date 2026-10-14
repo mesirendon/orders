@@ -4,6 +4,7 @@ import { createPool } from './db/pool.js';
 import { MockGeocoder } from './geocoder/mockGeocoder.js';
 import { HttpPaymentGateway } from './payments/httpPaymentGateway.js';
 import { startJob } from './services/jobs.js';
+import { publishOutbox } from './services/outboxPoller.js';
 import { reconcile } from './services/reconciler.js';
 import { sweepExpiredReservations } from './services/sweeper.js';
 import type { Deps } from './services/types.js';
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
   const jobs = [
     startJob('sweeper', config.SWEEP_INTERVAL_MS, () => sweepExpiredReservations(deps, jobLog), jobLog),
     startJob('reconciler', config.RECONCILE_INTERVAL_MS, () => reconcile(deps, jobLog), jobLog),
+    startJob('outbox', config.OUTBOX_INTERVAL_MS, () => publishOutbox(deps, jobLog), jobLog),
   ];
 
   pool.on('error', (err) => app.log.error({ err }, 'idle postgres client error'));
